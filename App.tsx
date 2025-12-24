@@ -126,6 +126,43 @@ const toolsDeclarations: Tool[] = [
   {
     functionDeclarations: [
       {
+        name: 'stopSession',
+        description: 'Stop the voice assistant and disconnect immediately. Use when user says "close", "shut down", "goodbye", "stop listening".',
+        parameters: { type: Type.OBJECT, properties: {} }
+      },
+      {
+        name: 'resetSystem',
+        description: 'Reset the entire application to default state. Clears canvas, settings, and audio.',
+        parameters: { type: Type.OBJECT, properties: {} }
+      },
+      {
+        name: 'controlBackground',
+        description: 'Control the background image or mode. Can switch between images in the deck or change themes.',
+        parameters: {
+          type: Type.OBJECT,
+          properties: {
+            action: { 
+                type: Type.STRING, 
+                enum: ['next_image', 'prev_image', 'random_image', 'dark_mode', 'light_mode', 'gradient_mode'],
+                description: 'The action to perform on the background.'
+            }
+          },
+          required: ['action']
+        }
+      },
+      {
+        name: 'changeVolume',
+        description: 'Change the music volume level.',
+        parameters: {
+          type: Type.OBJECT,
+          properties: {
+            action: { type: Type.STRING, enum: ['set', 'increase', 'decrease', 'mute'], description: 'The type of volume change.' },
+            value: { type: Type.NUMBER, description: 'The target volume level (0-100) for "set" action, or amount to change for increase/decrease.' }
+          },
+          required: ['action']
+        }
+      },
+      {
         name: 'changeColor',
         description: 'Change the color of the particles. Use hex codes or color names.',
         parameters: {
@@ -208,6 +245,13 @@ const App: React.FC = () => {
   const [bgImages, setBgImages] = useState<string[]>([]);
   const [bgImage, setBgImage] = useState<string | null>(null);
   
+  // Refs for State Access inside Closures (Fixes "It didn't work" issues)
+  const bgImagesRef = useRef<string[]>(bgImages);
+  const bgImageRef = useRef<string | null>(bgImage);
+  
+  useEffect(() => { bgImagesRef.current = bgImages; }, [bgImages]);
+  useEffect(() => { bgImageRef.current = bgImage; }, [bgImage]);
+
   // AI Generated Images
   const [generatedImages, setGeneratedImages] = useState<string[]>([]);
   const [generatedPrompts, setGeneratedPrompts] = useState<string[]>([]); // New state for debug
@@ -250,6 +294,10 @@ const App: React.FC = () => {
   const [audioTitle, setAudioTitle] = useState<string | null>(null);
   const [isPlaying, setIsPlaying] = useState<boolean>(true);
   const [volume, setVolume] = useState<number>(0.5);
+  // Volume Ref for Live API
+  const volumeRef = useRef<number>(volume);
+  useEffect(() => { volumeRef.current = volume; }, [volume]);
+
   const [repulsionStrength, setRepulsionStrength] = useState<number>(50);
   const [repulsionRadius, setRepulsionRadius] = useState<number>(50);
   const [particleCount, setParticleCount] = useState<number>(40000); 
@@ -387,10 +435,12 @@ const App: React.FC = () => {
                           for (const fc of msg.toolCall.functionCalls) {
                               console.log("Tool call received:", fc.name, fc.args);
                               
-                              let result: any = { status: 'ok' };
-                              
                               // Execute Action
-                              if (fc.name === 'changeColor') {
+                              if (fc.name === 'stopSession') {
+                                  disconnectGeminiLive();
+                              } else if (fc.name === 'resetSystem') {
+                                  handleResetAll();
+                              } else if (fc.name === 'changeColor') {
                                   setParticleColor(fc.args.color as string);
                                   // Eğer resim modundaysa orijinal renkleri kapat
                                   setUseImageColors(false);
@@ -408,18 +458,73 @@ const App: React.FC = () => {
                               } else if (fc.name === 'writeText') {
                                   setCurrentText(fc.args.text as string);
                                   setIsSceneVisible(true);
+                              } else if (fc.name === 'changeVolume') {
+                                  // Volume Control
+                                  const action = fc.args.action as string;
+                                  let newVal = volumeRef.current;
+                                  
+                                  if (action === 'set') {
+                                      newVal = (fc.args.value as number || 50) / 100;
+                                  } else if (action === 'increase') {
+                                      newVal = Math.min(1, newVal + (fc.args.value as number || 10) / 100);
+                                  } else if (action === 'decrease') {
+                                      newVal = Math.max(0, newVal - (fc.args.value as number || 10) / 100);
+                                  } else if (action === 'mute') {
+                                      newVal = 0;
+                                  }
+                                  setVolume(newVal);
+                              } else if (fc.name === 'controlBackground') {
+                                  const action = fc.args.action as string;
+                                  
+                                  if (action === 'dark_mode') {
+                                      setBgMode('dark');
+                                      setParticleColor('#ffffff');
+                                  } else if (action === 'light_mode') {
+                                      setBgMode('light');
+                                      setParticleColor('#000000');
+                                  } else if (action === 'gradient_mode') {
+                                      setBgMode('gradient');
+                                  } else if (['next_image', 'prev_image', 'random_image'].includes(action)) {
+                                      // IMPORTANT: Use Ref to get CURRENT list, not closure list
+                                      const currentImages = bgImagesRef.current;
+                                      const currentBg = bgImageRef.current;
+                                      
+                                      if (currentImages && currentImages.length > 0) {
+                                          setBgMode('image');
+                                          let currentIndex = -1;
+                                          if (currentBg) currentIndex = currentImages.indexOf(currentBg);
+                                          
+                                          let nextIndex = 0;
+                                          if (action === 'next_image') {
+                                              nextIndex = (currentIndex + 1) % currentImages.length;
+                                          } else if (action === 'prev_image') {
+                                              nextIndex = (currentIndex - 1 + currentImages.length) % currentImages.length;
+                                          } else if (action === 'random_image') {
+                                              nextIndex = Math.floor(Math.random() * currentImages.length);
+                                          }
+                                          
+                                          const nextImg = currentImages[nextIndex];
+                                          setBgImage(nextImg);
+                                          // Slayt gösterisini durdur
+                                          setSlideshowSettings(prev => ({ ...prev, active: false }));
+                                      } else {
+                                          console.warn("No images in deck to switch to");
+                                      }
+                                  }
                               }
 
-                              // Send Response back to Model
-                              sessionPromise.then(session => {
-                                  session.sendToolResponse({
-                                      functionResponses: [{
-                                          id: fc.id,
-                                          name: fc.name,
-                                          response: { result: "Action executed successfully" }
-                                      }]
+                              // Send Response back to Model (Except for stopSession which closes connection)
+                              if (fc.name !== 'stopSession') {
+                                  sessionPromise.then(session => {
+                                      session.sendToolResponse({
+                                          functionResponses: [{
+                                              id: fc.id,
+                                              name: fc.name,
+                                              response: { result: "Action executed successfully" }
+                                          }]
+                                      });
                                   });
-                              });
+                              }
                           }
                       }
 
@@ -474,18 +579,23 @@ const App: React.FC = () => {
                       voiceConfig: { prebuiltVoiceConfig: { voiceName: 'Kore' } }
                   },
                   tools: toolsDeclarations, // ARTIK ARAÇLAR TANIMLI
-                  systemInstruction: `Sen 'Partikül Yazı Morfolojisi' adındaki fütüristik bir 3D web deneyiminin asistanısın. 
-                  Sadece sohbet etme, AYNI ZAMANDA SİTEYİ KONTROL ETME YETKİN VAR.
+                  systemInstruction: `Sen 'Partikül Yazı Morfolojisi' deneyiminin sesli asistanısın. Sitenin tüm özelliklerini kontrol edebilirsin.
                   
-                  Kullanıcı "Rengi kırmızı yap" derse 'changeColor' aracını kullan.
-                  "Şekli küp yap" derse 'changeShape' aracını kullan.
-                  "Ateş efekti aç" derse 'setPreset' ile 'fire' gönder.
-                  "Müziği durdur" derse 'toggleMusic' kullan.
-                  "Parlamayı aç" derse 'toggleBloom' kullan.
-                  "Merhaba yaz" derse 'writeText' kullan.
+                  ÖNEMLİ: Kullanıcı "Kapat", "Görüşürüz", "Dinlemeyi durdur" derse 'stopSession' aracını kullan ve konuşmayı bitir.
                   
-                  Kullanıcı Türkçe konuşursa Türkçe, İngilizce konuşursa İngilizce cevap ver.
-                  Samimi, kısa ve arkadaşça konuş. Bir işlem yaptığında "Hemen yapıyorum", "Rengi değiştirdim" gibi kısa onaylar ver.`
+                  Kullanıcı "Arka planı değiştir", "Sıradaki resim", "Önceki resim" derse 'controlBackground' aracını kullan. Eğer hiç resim yüklenmemişse kullanıcıyı uyar.
+                  "Sistemi sıfırla", "Baştan başlat" derse 'resetSystem' aracını kullan.
+                  "Sesi aç", "Kıs", "%50 yap", "Kapat" gibi komutlarda 'changeVolume' aracını kullan.
+                  
+                  Diğer komutlar:
+                  - "Rengi kırmızı yap" -> changeColor
+                  - "Şekli küp yap" -> changeShape
+                  - "Ateş efekti aç" -> setPreset
+                  - "Müziği durdur/başlat" -> toggleMusic
+                  - "Parlamayı aç/kapat" -> toggleBloom
+                  - "Merhaba yaz" -> writeText
+                  
+                  Türkçe veya İngilizce cevap ver. Kısa, samimi ve onayı net cümleler kur. İşlemi yaparken "Hemen", "Yapıyorum", "Tamamdır" gibi geri bildirimler ver.`
               }
           });
           
